@@ -51,6 +51,29 @@ function truncate(text: string): string {
 	return `${text.slice(0, MAX_CONTENT_CHARS)}\n\n[Truncated at ${MAX_CONTENT_CHARS} characters]`;
 }
 
+/** Self-hosted Firecrawl fallback for JS-rendered pages (roundhouse fork):
+ *  POST {FIRECRAWL_URL}/v1/scrape → {success, data: {markdown, metadata}}.
+ *  Used INSTEAD of Jina Reader when FIRECRAWL_URL is set, so page contents
+ *  never go to a third-party reader service. */
+async function fetchViaFirecrawl(baseUrl: string, url: string): Promise<string | null> {
+	try {
+		const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/v1/scrape`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ url, formats: ["markdown"] }),
+			signal: AbortSignal.timeout(60_000),
+		});
+		if (!res.ok) return null;
+		const data = (await res.json()) as { success?: boolean; data?: { markdown?: string; metadata?: { title?: string } } };
+		const markdown = data.data?.markdown?.trim() ?? "";
+		if (!data.success || markdown.length < MIN_USEFUL_CONTENT) return null;
+		const title = data.data?.metadata?.title;
+		return `${title ? `# ${title}\n\n` : ""}Source: ${url} (via Firecrawl)\n\n---\n\n${markdown}`;
+	} catch {
+		return null;
+	}
+}
+
 /** Jina Reader fallback for JS-rendered pages (no deps — plain fetch). */
 async function fetchViaJina(url: string): Promise<string | null> {
 	try {
@@ -116,9 +139,11 @@ async function fetchAndExtract(url: string): Promise<string> {
 		const header = extracted.title ? `# ${extracted.title}\n\n${sourceLine}\n\n---\n\n` : `${sourceLine}\n\n---\n\n`;
 		return header + truncate(extracted.content);
 	}
-	// Readability failed — likely JS-rendered. Try Jina Reader.
-	const jina = await fetchViaJina(url);
-	if (jina) return truncate(jina);
+	// Readability failed — likely JS-rendered. Try self-hosted Firecrawl when
+	// configured (never falls through to Jina then), else Jina Reader.
+	const firecrawlUrl = process.env.FIRECRAWL_URL?.trim();
+	const rendered = firecrawlUrl ? await fetchViaFirecrawl(firecrawlUrl, url) : await fetchViaJina(url);
+	if (rendered) return truncate(rendered);
 	throw new Error("Could not extract readable content (the page may be JavaScript-rendered)");
 }
 

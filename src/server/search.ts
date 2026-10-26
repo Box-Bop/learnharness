@@ -108,20 +108,66 @@ export function braveProvider(apiKey: string, fetchFn: FetchLike = fetch): Searc
 	};
 }
 
+/** SearXNG (self-hosted, no key): GET {SEARXNG_URL}/search?format=json.
+ *  The instance must have `json` in search.formats. The "key" this engine
+ *  resolves with is the instance's base URL (env SEARXNG_URL), e.g.
+ *  http://127.0.0.1:8888. Response {results: [{title, url, content, …}]}. */
+export function searxngProvider(baseUrl: string, fetchFn: FetchLike = fetch): SearchProvider {
+	return {
+		id: "searxng",
+		async search(query: string, count: number): Promise<SearchHit[]> {
+			const url = new URL("search", baseUrl.endsWith("/") ? baseUrl : `${baseUrl}/`);
+			url.searchParams.set("q", query);
+			url.searchParams.set("format", "json");
+			const resp = await fetchFn(url.toString(), {
+				headers: { accept: "application/json" },
+				signal: AbortSignal.timeout(30_000),
+			});
+			if (!resp.ok) {
+				const body = await resp.text();
+				throw new Error(`SearXNG ${resp.status}: ${body.slice(0, 200)}`);
+			}
+			const data = (await resp.json()) as {
+				results?: Array<{ title?: string; url?: string; content?: string }>;
+			};
+			return (data.results ?? [])
+				.filter((r) => typeof r.url === "string" && r.url)
+				.slice(0, Math.min(count, 20))
+				.map((r) => ({
+					title: r.title ?? r.url ?? "",
+					url: r.url ?? "",
+					snippet: (r.content ?? "").replace(/\n/g, " ").slice(0, 500),
+				}));
+		},
+	};
+}
+
 /** The engines this wave ships, in PREFERENCE order (both keys present,
  *  no explicit pin → the first live engine wins; owner decision
- *  2026-09-20: Tavily first — the AI-native search API the wave chose). */
+ *  2026-09-20: Tavily first — the AI-native search API the wave chose).
+ *  roundhouse fork: a configured self-hosted SearXNG wins over both. */
 const ENGINE_ORDER: ReadonlyArray<{ id: SearchEngineId; envVar: string }> = [
+	{ id: "searxng", envVar: "SEARXNG_URL" },
 	{ id: "tavily", envVar: "TAVILY_API_KEY" },
 	{ id: "brave", envVar: "BRAVE_API_KEY" },
 ];
 
 /** The engine's key (env-or-file; env wins) — null when the engine is
- *  not keyed, which by owner decision means NOT LIVE. */
+ *  not keyed, which by owner decision means NOT LIVE. SearXNG's "key" is
+ *  its base URL and lives in the environment only (not the auth store). */
 function engineKey(id: SearchEngineId): string | null {
+	if (id === "searxng") return process.env.SEARXNG_URL?.trim() || null;
 	const envVar = ENGINE_ORDER.find((e) => e.id === id)?.envVar;
 	const value = envVar ? keyValue(envVar) : undefined;
 	return value ? value : null;
+}
+
+function engineKeys(): Partial<Record<SearchEngineId, string | undefined>> {
+	return {
+		searxng: engineKey("searxng") ?? undefined,
+		tavily: engineKey("tavily") ?? undefined,
+		brave: engineKey("brave") ?? undefined,
+	};
 }
 
 /** Resolve the search state PURELY from the given pins (testable): the
@@ -160,13 +206,7 @@ export function resolveSearchEngineFor(
  *  settings record's pin + the auth store fresh each call, so a key saved
  *  mid-session activates on the next check (no restart). */
 export function searchStatus(): SearchStatus {
-	const { available, engine, reason } = resolveSearchEngineFor(
-		effectiveSettings().agent.search?.engine,
-		{
-			tavily: engineKey("tavily") ?? undefined,
-			brave: engineKey("brave") ?? undefined,
-		},
-	);
+	const { available, engine, reason } = resolveSearchEngineFor(effectiveSettings().agent.search?.engine, engineKeys());
 	return { available, engine, reason };
 }
 
@@ -180,10 +220,8 @@ export function searchAvailable(): boolean {
  *  the tool layer (Teacher stream) calls this once per search, so key
  *  rotations take effect immediately. */
 export function searchProvider(): SearchProvider | null {
-	const resolved = resolveSearchEngineFor(effectiveSettings().agent.search?.engine, {
-		tavily: engineKey("tavily") ?? undefined,
-		brave: engineKey("brave") ?? undefined,
-	});
+	const resolved = resolveSearchEngineFor(effectiveSettings().agent.search?.engine, engineKeys());
 	if (!resolved.available || !resolved.key) return null;
+	if (resolved.engine === "searxng") return searxngProvider(resolved.key);
 	return resolved.engine === "tavily" ? tavilyProvider(resolved.key) : braveProvider(resolved.key);
 }
