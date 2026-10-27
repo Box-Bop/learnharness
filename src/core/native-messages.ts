@@ -149,9 +149,19 @@ export function failedOutputCallIds(messages: readonly LhMessage[]): ReadonlySet
 
 // ─── id minting ──────────────────────────────────────────────────────────────
 
+/** 8 random hex chars. crypto.randomUUID exists only in SECURE contexts
+ *  (https or localhost), so a browser on plain http over the LAN/tailnet
+ *  would throw here and silently drop the send; getRandomValues is
+ *  available everywhere. */
+function randomHex8(): string {
+	if (typeof crypto.randomUUID === "function") return crypto.randomUUID().slice(0, 8);
+	const bytes = crypto.getRandomValues(new Uint8Array(4));
+	return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 /** The app-wide message id shape (same as the UIMessage-era mint). */
 export function newMessageId(): string {
-	return `msg_${Date.now().toString(36)}_${crypto.randomUUID().slice(0, 8)}`;
+	return `msg_${Date.now().toString(36)}_${randomHex8()}`;
 }
 
 // ─── constructors (the input-event → native append mapping lives in
@@ -223,7 +233,7 @@ export function newPlanBlockMessage(
 	block: unknown,
 ): LhMarkerMessage {
 	return {
-		id: `pb_${Date.now().toString(36)}_${crypto.randomUUID().slice(0, 8)}`,
+		id: `pb_${Date.now().toString(36)}_${randomHex8()}`,
 		role: "custom",
 		customType: "plan-block",
 		content: "",
