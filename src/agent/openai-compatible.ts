@@ -89,6 +89,18 @@ export function openAICompatibleScanned(): boolean {
 	return !!cfg && state().scan?.baseUrl === cfg.baseUrl;
 }
 
+/** roundhouse fork: OPENAI_COMPATIBLE_MAX_TOKENS overrides every model's
+ *  per-reply output cap. Self-hosted servers (llama.cpp, Radiance) don't
+ *  publish one, so the 8k default applied, and a thinking model's planning
+ *  turn spent all of it on reasoning and stopped with finish_reason
+ *  "length" before calling plan_init. */
+function maxTokensFor(info: OpenAICompatibleModelInfo): number {
+	const raw = Number(process.env.OPENAI_COMPATIBLE_MAX_TOKENS);
+	if (!Number.isFinite(raw) || raw <= 0) return info.maxTokens;
+	// Never let a reply claim the whole window: keep half of it for input.
+	return Math.floor(Math.min(raw, info.contextWindow / 2));
+}
+
 function toModel(info: OpenAICompatibleModelInfo, baseUrl: string): Model<"openai-completions"> {
 	return {
 		id: info.id,
@@ -100,7 +112,7 @@ function toModel(info: OpenAICompatibleModelInfo, baseUrl: string): Model<"opena
 		input: [...info.input],
 		cost: { ...info.cost },
 		contextWindow: info.contextWindow,
-		maxTokens: info.maxTokens,
+		maxTokens: maxTokensFor(info),
 	};
 }
 
